@@ -787,6 +787,93 @@ def cmd_sending(args):
     asyncio.run(_run())
 
 
+def _age(stamp: str) -> str:
+    """'3h ago' from a stored timestamp, or the raw value if unparseable."""
+    from datetime import datetime, timezone
+
+    if not stamp:
+        return "?"
+    try:
+        when = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return str(stamp)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    seconds = max(0, (datetime.now(timezone.utc) - when).total_seconds())
+    for size, label in ((86400, "d"), (3600, "h"), (60, "m")):
+        if seconds >= size:
+            return f"{int(seconds // size)}{label} ago"
+    return "just now"
+
+
+def cmd_journal(args):
+    """Show what Harvey changed, and what has been failing."""
+    from harvey.state import StateManager
+
+    async def _run():
+        state = StateManager()
+        await state.init_db()
+
+        if args.resolve:
+            ok = await state.resolve_error(args.resolve, args.note or "resolved by hand")
+            if ok:
+                print(f"\n  Marked {args.resolve} resolved. A recurrence reopens it.\n")
+            else:
+                print(f"\n  No open error with fingerprint {args.resolve}.\n")
+            return
+
+        if args.errors:
+            rows = await state.open_errors(limit=args.limit)
+            if not rows:
+                print("\n  No open errors. Harvey has nothing to complain about.\n")
+                return
+            print(f"\n  Open errors ({len(rows)}) — most persistent first")
+            print("  " + "=" * 66)
+            for row in rows:
+                seen = (f"{row['occurrences']}x" if row["occurrences"] > 1 else "once")
+                print(f"\n  [{row['fingerprint']}] {row['actor']}.{row['action']}"
+                      f"  {seen}, last {_age(row['last_seen'])}")
+                print(f"      {row['summary'][:300]}")
+                context = row.get("context_json") or ""
+                if context not in ("", "{}"):
+                    print(f"      context: {context[:200]}")
+            print("\n  Fix one, then: harvey journal --resolve <fingerprint>\n")
+            return
+
+        rows = await state.journal_entries(
+            kind="change" if args.changes else None, limit=args.limit
+        )
+        if not rows:
+            print("\n  Journal is empty — Harvey hasn't changed anything yet.\n")
+            return
+        label = "Modifications" if args.changes else "Journal"
+        print(f"\n  {label} ({len(rows)}) — newest first")
+        print("  " + "=" * 66)
+        for row in rows:
+            mark = {"change": "~", "error": "!", "note": "."}.get(row["kind"], " ")
+            print(f"\n  {mark} {_age(row['last_seen']):>10}  {row['actor']}."
+                  f"{row['action']}" + (f"  [{row['target']}]" if row["target"] else ""))
+            print(f"      {row['summary'][:300]}")
+            if row["kind"] == "change" and row.get("before_json"):
+                print(f"      before: {row['before_json'][:160]}")
+                print(f"      after:  {row['after_json'][:160]}")
+        print()
+
+    asyncio.run(_run())
+
+
+def cmd_where(args):
+    """Show which files this install is actually using."""
+    from harvey import paths
+
+    print("\n  Harvey is using these locations")
+    print("  " + "=" * 66)
+    for key, value in paths.describe().items():
+        print(f"  {key.replace('_', ' '):<14} {value}")
+    print(f"\n  Set {paths.ENV_HOME} to move the home, {paths.ENV_DB} for the"
+          " database alone.\n")
+
+
 def main():
     from harvey.textio import utf8_stdio
     utf8_stdio()
@@ -924,6 +1011,24 @@ def main():
     sub = subparsers.add_parser(
         "retry-writes", help="Retry prospects the Writer couldn't write an email for")
     sub.set_defaults(func=cmd_retry_writes)
+
+    sub = subparsers.add_parser(
+        "journal",
+        help="What Harvey changed, and what has been failing",
+    )
+    sub.add_argument("--errors", action="store_true",
+                     help="only open failures, most persistent first")
+    sub.add_argument("--changes", action="store_true",
+                     help="only modifications, with before/after")
+    sub.add_argument("--resolve", metavar="FINGERPRINT",
+                     help="mark an error fixed (a recurrence reopens it)")
+    sub.add_argument("--note", help="resolution note to store with --resolve")
+    sub.add_argument("--limit", type=int, default=20, help="rows to show (default 20)")
+    sub.set_defaults(func=cmd_journal)
+
+    sub = subparsers.add_parser(
+        "where", help="Show which config, env and database this install uses")
+    sub.set_defaults(func=cmd_where)
 
     sub = subparsers.add_parser("sending", help="Kill switch: pause/resume sending")
     sub.add_argument("sending_action", nargs="?", default="status",

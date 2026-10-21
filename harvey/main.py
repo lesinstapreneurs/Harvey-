@@ -151,7 +151,28 @@ async def decide_next_action(
     return action
 
 
-async def _run_agents(tasks: list) -> dict:
+async def _remember_failure(state, actor: str, action: str,
+                            exc: BaseException, **context) -> None:
+    """Record a failure in the journal, and never fail because of it.
+
+    The journal exists to explain a bad night after the fact, so it must not
+    be able to end one: a broken journal write is logged and dropped.
+    """
+    if state is None:
+        return
+    try:
+        entry = await state.record_error(actor, action, exc, context=context)
+        if entry.get("occurrences", 1) > 1:
+            logger.warning(
+                f"{actor}.{action} has now failed {entry['occurrences']} times "
+                f"with the same error (journal {entry.get('fingerprint', '?')}) "
+                "— see `harvey journal --errors`."
+            )
+    except Exception as journal_exc:  # noqa: BLE001 — never mask the real error
+        logger.warning(f"Could not journal the {actor} failure: {journal_exc}")
+
+
+async def _run_agents(tasks: list, state=None) -> dict:
     """Run (name, coroutine) pairs in parallel; return {name: outcome}.
 
     Errors are caught per task so one bad agent never takes down the cycle,
@@ -168,11 +189,15 @@ async def _run_agents(tasks: list) -> dict:
             asyncio.gather(*[t[1] for t in tasks], return_exceptions=True),
             timeout=CYCLE_TIMEOUT_SECONDS,
         )
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as exc:
         logger.error(
             f"Cycle timed out after {CYCLE_TIMEOUT_SECONDS}s with "
             f"{[t[0] for t in tasks]} still running — cancelled, "
             "moving on to the next heartbeat instead of hanging forever."
+        )
+        await _remember_failure(
+            state, "main", "cycle.timeout", exc,
+            running=[t[0] for t in tasks], timeout_seconds=CYCLE_TIMEOUT_SECONDS,
         )
         results = []
     outcomes = {}
@@ -181,6 +206,7 @@ async def _run_agents(tasks: list) -> dict:
             raise result
         if isinstance(result, Exception):
             logger.error(f"Agent {name} failed: {result}", exc_info=result)
+            await _remember_failure(state, name, "agent.run", result)
         outcomes[name] = result
     return outcomes
 
@@ -345,7 +371,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             if summary.get("unprofiled", 0):
                 tasks.append(("profile", run_profile_stage(state, limit=25)))
 
-            outcomes = await _run_agents(tasks)
+            outcomes = await _run_agents(tasks, state)
 
             # Phase 2: send — only after every reply-reading task this cycle
             # finished reading and handling replies (it returns True; a
@@ -363,7 +389,9 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                         "until replies can be read again."
                     )
                 else:
-                    await _run_agents([(name, run()) for name, run in send_tasks])
+                    await _run_agents(
+                        [(name, run()) for name, run in send_tasks], state
+                    )
 
             # 6. Log the action (best-effort; never kills the loop)
             try:
@@ -391,6 +419,10 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             logger.error(
                 f"Error in heartbeat (failure #{consecutive_errors}): {e}",
                 exc_info=True,
+            )
+            await _remember_failure(
+                state, "main", "heartbeat", e,
+                consecutive_errors=consecutive_errors,
             )
             logger.info(f"Recovering... sleeping {backoff}s before retry.")
             if await _interruptible_sleep(backoff, stop_event):

@@ -10,6 +10,10 @@ upgrade cleanly in place.
 """
 
 import json
+import logging
+import os
+import re
+import traceback as traceback_mod
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, date, timedelta, timezone
@@ -23,6 +27,8 @@ from harvey.models.campaign import Campaign, EmailStep  # noqa: F401 (EmailStep 
 from harvey.models.conversation import Conversation, Message  # noqa: F401
 
 from harvey import paths
+
+logger = logging.getLogger("harvey.state")
 
 # Resolved at import: the per-user home for a normal install, or a checkout's
 # own data/ when one already holds a database (see harvey/paths.py).
@@ -66,6 +72,29 @@ def _utcnow() -> datetime:
 def _norm(value: str | None) -> str:
     """Normalize an identity key (email/domain) for dedup: strip + lowercase."""
     return (value or "").strip().lower()
+
+
+# Record ids, counts, hex addresses, quoted values and paths differ between two
+# occurrences of the same bug. Blanking them is what makes a fingerprint stable
+# enough to collapse "the same failure, again".
+_VOLATILE = re.compile(r"0x[0-9a-fA-F]+|\d+|'[^']*'|\"[^\"]*\"|/[\w./-]+")
+
+
+def _fingerprint(actor: str, action: str, exc: BaseException) -> str:
+    """A stable identity for one failure mode.
+
+    Built from where it happened and what kind of error it was, not from the
+    message's variable details — otherwise every retry looks like a new bug.
+    """
+    message = _VOLATILE.sub("?", str(exc))
+    frame = ""
+    tb = exc.__traceback__
+    while tb is not None:               # the innermost frame is the useful one
+        code = tb.tb_frame.f_code
+        frame = f"{os.path.basename(code.co_filename)}:{code.co_name}"
+        tb = tb.tb_next
+    raw = f"{actor}|{action}|{type(exc).__name__}|{message}|{frame}"
+    return uuid.uuid5(uuid.NAMESPACE_OID, raw).hex[:16]
 
 
 # ── Schema migrations ─────────────────────────────────────────────────
@@ -436,6 +465,46 @@ MIGRATIONS: list[str] = [
     -- claude_calls keeps meaning Claude calls; Codex calls count separately
     -- so one subscription's budget never consumes the other's.
     ALTER TABLE usage_log ADD COLUMN codex_calls INTEGER DEFAULT 0;
+    """,
+    # ── v12: journal — what Harvey changed, and what went wrong ──
+    """
+    -- `actions` records that something happened; `runs` records how a
+    -- discovery run ended. Neither answers the two questions you actually ask
+    -- after leaving an autonomous agent running overnight: what did it change
+    -- in my data, and what has been failing?
+    --
+    -- A change row carries before_json and after_json, so a modification can
+    -- be read back long after the log line scrolled away.
+    --
+    -- An error row carries a fingerprint: the same failure recurring bumps
+    -- `occurrences` instead of appending a near-identical row, which is what
+    -- makes "this has broken 40 times since midnight" visible at a glance and
+    -- lets a caller back off instead of retrying all night.
+    CREATE TABLE IF NOT EXISTS journal (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,                 -- change | error | note
+        actor TEXT NOT NULL DEFAULT '',     -- main | scout | writer | cli | ...
+        action TEXT NOT NULL DEFAULT '',
+        target TEXT DEFAULT '',
+        summary TEXT NOT NULL DEFAULT '',
+        before_json TEXT DEFAULT '',
+        after_json TEXT DEFAULT '',
+        error_type TEXT DEFAULT '',
+        traceback TEXT DEFAULT '',
+        context_json TEXT DEFAULT '{}',
+        fingerprint TEXT DEFAULT '',
+        occurrences INTEGER DEFAULT 1,
+        first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        resolved_at TIMESTAMP,
+        resolution TEXT DEFAULT ''
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_journal_kind_seen ON journal(kind, last_seen);
+    -- One row per distinct failure. Partial, so change/note rows (which carry
+    -- no fingerprint) are never collapsed together.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_journal_fingerprint
+        ON journal(fingerprint) WHERE fingerprint != '';
     """,
 ]
 
@@ -1095,7 +1164,16 @@ class StateManager:
                     (_utcnow().isoformat(),),
                 )
             await db.commit()
-            return cursor.rowcount
+            approved = cursor.rowcount
+        if approved:
+            await self.note_change(
+                "user", "outbox.approve",
+                f"approved {approved} queued email(s)"
+                + (f" (item {item_id})" if item_id else " (all pending)"),
+                target=f"outbox:{item_id}" if item_id else "outbox",
+                after={"approved": approved},
+            )
+        return approved
 
     async def cancel_pending_outbox_for_prospect(
         self, prospect_id: str, reason: str = "stop_on_reply"
@@ -1232,13 +1310,27 @@ class StateManager:
         if status not in ("proposed", "confirmed", "rejected"):
             raise ValueError(f"invalid signal status: {status}")
         async with self._connect() as db:
+            async with db.execute(
+                "SELECT status FROM signal_codes WHERE code = ?", (code,)
+            ) as cursor:
+                previous = await cursor.fetchone()
             cursor = await db.execute(
                 "UPDATE signal_codes SET status = ?, updated_at = CURRENT_TIMESTAMP "
                 "WHERE code = ?",
                 (status, code),
             )
             await db.commit()
-            return cursor.rowcount > 0
+            changed = cursor.rowcount > 0
+        was = previous[0] if previous else None
+        if changed and was != status:
+            # Which signals are live decides what Harvey spends money on, so
+            # the switch is worth remembering, not just logging.
+            await self.note_change(
+                "user", "signal.status", f"{code}: {was} -> {status}",
+                target=f"signal:{code}", before={"status": was},
+                after={"status": status},
+            )
+        return changed
 
     async def confirmed_signal_codes(self) -> set[str]:
         return {r["code"] for r in await self.get_signal_codes(status="confirmed")}
@@ -1667,6 +1759,10 @@ class StateManager:
 
     async def set_setting(self, key: str, value: str):
         async with self._connect() as db:
+            async with db.execute(
+                "SELECT value FROM settings WHERE key = ?", (key,)
+            ) as cursor:
+                previous = await cursor.fetchone()
             await db.execute(
                 """INSERT INTO settings (key, value, updated_at)
                    VALUES (?, ?, CURRENT_TIMESTAMP)
@@ -1675,6 +1771,12 @@ class StateManager:
                 (key, str(value)),
             )
             await db.commit()
+        was = previous[0] if previous else None
+        if was != str(value):
+            await self.note_change(
+                "user", "setting", f"{key}: {was!r} -> {str(value)!r}",
+                target=f"setting:{key}", before={key: was}, after={key: str(value)},
+            )
 
     async def increment_setting(self, key: str, by: int = 1) -> int:
         current = await self.get_setting(key, "0")
@@ -1934,6 +2036,151 @@ class StateManager:
                 (_new_id(), action_type, agent, json.dumps(details or {})),
             )
             await db.commit()
+
+    # ── Journal: what Harvey changed, and what went wrong ──
+
+    async def note_change(self, actor: str, action: str, summary: str, **kw) -> None:
+        """record_change that can never break its caller.
+
+        Used from inside state mutations: remembering a change must not give
+        the change itself a new way to fail.
+        """
+        try:
+            await self.record_change(actor, action, summary, **kw)
+        except Exception:  # noqa: BLE001 — the mutation already succeeded
+            logger.warning("could not journal %s.%s", actor, action, exc_info=True)
+
+    async def record_change(
+        self,
+        actor: str,
+        action: str,
+        summary: str,
+        *,
+        target: str = "",
+        before=None,
+        after=None,
+    ) -> str:
+        """Remember a modification, with enough detail to read it back.
+
+        Best-effort by design: a journal write must never be the reason a send
+        or a state update fails, so callers are not expected to guard it.
+        """
+        entry_id = _new_id()
+        async with self._connect() as db:
+            await db.execute(
+                """INSERT INTO journal
+                   (id, kind, actor, action, target, summary, before_json, after_json)
+                   VALUES (?, 'change', ?, ?, ?, ?, ?, ?)""",
+                (entry_id, actor, action, target, summary,
+                 json.dumps(before, default=str) if before is not None else "",
+                 json.dumps(after, default=str) if after is not None else ""),
+            )
+            await db.commit()
+        return entry_id
+
+    async def record_error(
+        self,
+        actor: str,
+        action: str,
+        exc: BaseException,
+        *,
+        target: str = "",
+        context: dict | None = None,
+    ) -> dict:
+        """Remember a failure, collapsing a recurrence onto the existing row.
+
+        Returns the stored row. Its ``occurrences`` is the number of times this
+        exact failure has now been seen, which is the signal to stop retrying.
+
+        A recurrence of a failure someone marked resolved reopens it: it
+        evidently was not fixed.
+        """
+        fingerprint = _fingerprint(actor, action, exc)
+        summary = f"{type(exc).__name__}: {exc}".strip()
+        trace = "".join(
+            traceback_mod.format_exception(type(exc), exc, exc.__traceback__)
+        )
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute(
+                """INSERT INTO journal
+                   (id, kind, actor, action, target, summary, error_type,
+                    traceback, context_json, fingerprint, occurrences,
+                    first_seen, last_seen)
+                   VALUES (?, 'error', ?, ?, ?, ?, ?, ?, ?, ?, 1,
+                           CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                   ON CONFLICT(fingerprint) WHERE fingerprint != ''
+                   DO UPDATE SET
+                       occurrences = journal.occurrences + 1,
+                       last_seen   = CURRENT_TIMESTAMP,
+                       summary     = excluded.summary,
+                       traceback   = excluded.traceback,
+                       context_json = excluded.context_json,
+                       resolved_at = NULL,
+                       resolution  = ''""",
+                (_new_id(), actor, action, target, summary,
+                 type(exc).__name__, trace,
+                 json.dumps(context or {}, default=str), fingerprint),
+            )
+            await db.commit()
+            async with db.execute(
+                "SELECT * FROM journal WHERE fingerprint = ?", (fingerprint,)
+            ) as cursor:
+                row = await cursor.fetchone()
+        return dict(row) if row else {"fingerprint": fingerprint, "occurrences": 1}
+
+    async def error_recurrences(
+        self, actor: str, action: str, exc: BaseException
+    ) -> int:
+        """How many times this exact failure is already known, 0 if never."""
+        async with self._connect() as db:
+            async with db.execute(
+                """SELECT occurrences FROM journal
+                   WHERE fingerprint = ? AND resolved_at IS NULL""",
+                (_fingerprint(actor, action, exc),),
+            ) as cursor:
+                row = await cursor.fetchone()
+        return int(row[0]) if row else 0
+
+    async def resolve_error(self, fingerprint: str, resolution: str = "") -> bool:
+        """Mark a failure fixed. A later recurrence reopens it automatically."""
+        async with self._connect() as db:
+            cursor = await db.execute(
+                """UPDATE journal
+                   SET resolved_at = CURRENT_TIMESTAMP, resolution = ?
+                   WHERE kind = 'error' AND fingerprint = ?""",
+                (resolution, fingerprint),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def journal_entries(
+        self, kind: str | None = None, limit: int = 50
+    ) -> list[dict]:
+        """Recent journal rows, newest first."""
+        sql = "SELECT * FROM journal"
+        args: list = []
+        if kind:
+            sql += " WHERE kind = ?"
+            args.append(kind)
+        sql += " ORDER BY last_seen DESC, rowid DESC LIMIT ?"
+        args.append(limit)
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, args) as cursor:
+                return [dict(r) for r in await cursor.fetchall()]
+
+    async def open_errors(self, limit: int = 50) -> list[dict]:
+        """Unresolved failures, the most persistent first."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT * FROM journal
+                   WHERE kind = 'error' AND resolved_at IS NULL
+                   ORDER BY occurrences DESC, last_seen DESC LIMIT ?""",
+                (limit,),
+            ) as cursor:
+                return [dict(r) for r in await cursor.fetchall()]
 
     # ── Analytics ──
 
