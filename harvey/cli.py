@@ -699,11 +699,12 @@ def cmd_warmup(args):
 
     from harvey import deliverability as d
     from harvey.agents.handler import BOUNCE_COUNT_KEY
+    from harvey import paths
     from harvey.config import ConfigError, load_config
-    from harvey.paths import PROJECT_ROOT
     from harvey.state import StateManager
 
-    load_dotenv(PROJECT_ROOT / ".env")
+    for _env in paths.env_files():
+        load_dotenv(_env, override=True)
     try:
         config = load_config()
     except ConfigError as e:

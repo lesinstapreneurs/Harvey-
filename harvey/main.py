@@ -401,10 +401,10 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
 
 def _needs_setup() -> bool:
     """Check if Harvey needs first-time setup."""
-    from harvey.paths import PROJECT_ROOT
+    from harvey import paths
     from harvey.config import _find_config_file, ConfigFileNotFoundError
 
-    env_file = PROJECT_ROOT / ".env"
+    env_file = paths.env_file()
 
     # If .env doesn't exist, definitely needs setup
     if not env_file.exists():

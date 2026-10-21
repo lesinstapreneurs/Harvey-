@@ -12,6 +12,7 @@ from harvey.textio import read_user_text
 from dotenv import load_dotenv
 from pydantic import BaseModel, ValidationError, field_validator, model_validator
 
+from harvey import paths
 from harvey.paths import PROJECT_ROOT
 
 logger = logging.getLogger("harvey.config")
@@ -651,13 +652,7 @@ def _find_config_file() -> str:
     the tracked ``harvey.yaml`` stays an untrained template — nobody
     publishes their positioning, pricing, and prospect targeting by accident.
     """
-    candidates = [
-        Path.cwd() / "harvey.local.yaml",
-        PROJECT_ROOT / "harvey.local.yaml",
-        Path.cwd() / "harvey.yaml",
-        Path.cwd().parent / "harvey.yaml",
-        PROJECT_ROOT / "harvey.yaml",
-    ]
+    candidates = paths.config_candidates()
     for path in candidates:
         if path.exists():
             return str(path)

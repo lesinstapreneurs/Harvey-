@@ -25,10 +25,11 @@ from fastapi.responses import (
 logger = logging.getLogger("harvey.dashboard")
 
 from harvey import dashboard_auth as auth  # noqa: E402
+from harvey import paths
 from harvey.paths import PROJECT_ROOT  # noqa: E402
 from harvey.textio import read_user_text  # noqa: E402
-DB_PATH = PROJECT_ROOT / "data" / "harvey.db"
-ENV_FILE = PROJECT_ROOT / ".env"
+DB_PATH = paths.state_db()
+ENV_FILE = paths.env_file()
 CONFIG_FILE = PROJECT_ROOT / "harvey.yaml"
 PID_FILE = PROJECT_ROOT / "data" / "harvey.pid"
 LOG_FILE = PROJECT_ROOT / "data" / "harvey.log"

@@ -22,9 +22,11 @@ from harvey.models.prospect import Prospect
 from harvey.models.campaign import Campaign, EmailStep  # noqa: F401 (EmailStep re-exported)
 from harvey.models.conversation import Conversation, Message  # noqa: F401
 
-from harvey.paths import PROJECT_ROOT
+from harvey import paths
 
-DB_PATH = PROJECT_ROOT / "data" / "harvey.db"
+# Resolved at import: the per-user home for a normal install, or a checkout's
+# own data/ when one already holds a database (see harvey/paths.py).
+DB_PATH = paths.state_db()
 
 # How long (seconds) a connection waits on a locked database before failing.
 BUSY_TIMEOUT_SECONDS = 30.0
