@@ -9,6 +9,29 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **A per-user home, so `harvey` works from any directory**
+  (`$HARVEY_HOME`, else `~/.harvey`). Config, `.env`, the database and logs
+  live there instead of beside the package, and lookups prefer the current
+  directory, then the home, then the checkout — so a project folder can still
+  carry its own `harvey.yaml` and win locally. An existing clone is
+  unaffected: a checkout already holding `data/harvey.db` keeps using it, so
+  upgrading never looks like losing every prospect. `HARVEY_DB` forces one
+  path, and **`harvey where`** prints everything it resolved.
+- **A journal of modifications and failures** (`harvey journal`, schema v12).
+  Changes record a before and an after — signal confirmations, outbox
+  approvals and settings including the sending kill switch — so a
+  modification is readable long after the log line is gone
+  (`harvey journal --changes`). Failures are grouped rather than listed: each
+  gets a fingerprint from the agent, action, exception type and innermost
+  frame with counts, ids and paths blanked, so a recurrence bumps an
+  occurrence count instead of burying everything else
+  (`harvey journal --errors`). That count is what an agent reads to back off
+  instead of retrying a doomed call all night, and
+  `harvey journal --resolve <fingerprint>` marks one fixed — a recurrence
+  reopens it. Wired into the heartbeat's three failure points (a failing
+  agent, a cycle timeout, the loop's catch-all) and best-effort throughout: a
+  broken journal write can end neither a cycle nor the change it describes.
+
 - **`harvey warmup [domain]`**: checks whether a sending domain is ready for
   cold email. It covers MX, SPF (`+all`, duplicates, top-level lookups), DKIM,
   DMARC, domain age, domain and SMTP-IP blocklists (a list that refuses the

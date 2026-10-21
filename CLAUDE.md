@@ -225,7 +225,11 @@ Users will come back with questions and tasks. Common ones:
 - **"Harvey isn't finding the right people"** → Check the ICP config in `harvey.yaml`. Adjust industries, titles, company_size, geography.
 - **"I want to change what Harvey says"** → Skills are in `skills/`, prompts are in `prompts/`. Both are plain markdown files. Edit them directly.
 - **"Train Harvey on a different product"** → `harvey train <new-url>`
-- **"How do I see the database?"** → It's at `data/harvey.db`. They can open it with any SQLite tool, or ask you to query it.
+- **"Where does Harvey keep things?"** → In `~/.harvey/` (or `$HARVEY_HOME`): config, `.env`, `data/harvey.db`, logs. That's what lets `harvey` work from any directory. A checkout that already has `data/harvey.db` keeps using it, so upgrading never looks like data loss. `harvey where` prints the resolved paths.
+
+- **"What did Harvey change last night? What's broken?"** → `harvey journal --changes` shows modifications with before/after; `harvey journal --errors` shows open failures grouped by fingerprint with an occurrence count, so a repeating failure reads as `3x` rather than three entries. `harvey journal --resolve <fingerprint>` marks one fixed, and a recurrence reopens it.
+
+- **"How do I see the database?"** → Run `harvey where` for its path. They can open it with any SQLite tool, or ask you to query it.
 - **"I just want the prospect list"** → `harvey export` writes a sequencer-ready CSV (verified/risky emails only; `--all` for everything). Also available as Export buttons on the dashboard's Contacts tab. Harvey is valuable purely as a list-builder even if the user never lets it send.
 
 ---
@@ -271,6 +275,8 @@ harvey gmail test            # Verify the Gmail connection
 harvey outbox                # Review queued emails; --approve <id> / --approve-all / --reject <id>
 harvey signals               # The signal vocabulary; --confirm / --reject CODES (or 'free' / 'all')
 harvey discover              # Find businesses; --providers / --estimate / --provider <key>
+harvey journal               # What changed / what's failing; --changes --errors --resolve <fp>
+harvey where                 # Which config, env and database this install resolved
 harvey sending pause|resume  # Kill switch for all outbound
 harvey warmup [domain]       # Sending-domain readiness: SPF/DKIM/DMARC, age, blocklists, ramp
 ```

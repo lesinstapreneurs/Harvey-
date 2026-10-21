@@ -42,6 +42,8 @@ anything, and approving mail one message at a time:
 - [The sub-agents](#the-sub-agents)
 - [Nothing sends without you](#nothing-sends-without-you)
 - [The dashboard](#the-dashboard)
+- [Using it from anywhere](#using-it-from-anywhere)
+- [What it changed, and what broke](#what-it-changed-and-what-broke)
 - [How the data is stored](#how-the-data-is-stored)
 - [Configuration](#configuration)
 - [Using a ChatGPT plan instead (Codex)](#using-a-chatgpt-plan-instead-codex)
@@ -378,9 +380,81 @@ Appearance has three states, not two. `auto` follows your OS and is the default,
 
 ---
 
+## Using it from anywhere
+
+Harvey keeps config, credentials and state in a per-user home so the command
+behaves the same in every directory — `harvey status` typed in a random folder
+reaches the same database as one typed in the checkout.
+
+```
+~/.harvey/                 # or wherever $HARVEY_HOME points
+├── harvey.yaml            # your config, if you don't keep one per project
+├── .env                   # credentials, shared by every directory
+├── data/harvey.db         # prospects, campaigns, conversations, journal
+└── logs/
+```
+
+Lookups prefer **the current directory**, then **the home**, then the checkout —
+so a project folder can still carry its own `harvey.yaml` or `.env` and win
+locally, while the checkout keeps shipping `prompts/` and `skills/`.
+
+```bash
+harvey where                      # print every resolved location
+HARVEY_HOME=~/work/harvey harvey status   # a second, separate profile
+HARVEY_DB=/tmp/scratch.db harvey status   # one-off database
+```
+
+**Upgrading an existing clone changes nothing.** A checkout that already holds
+`data/harvey.db` keeps using it, so moving to a per-user home never looks like
+losing every prospect.
+
+To get the command on your PATH for good, install it once with
+[pipx](https://pipx.pypa.io): `pipx install -e /path/to/harvey`.
+
+## What it changed, and what broke
+
+Harvey runs unattended, so the log is the wrong place for the two things you
+actually want afterwards. Both are kept in the database.
+
+```bash
+harvey journal              # everything, newest first
+harvey journal --changes    # modifications, with before and after
+harvey journal --errors     # open failures, most persistent first
+```
+
+**Modifications** carry a before and an after, so a change is readable long
+after the log line is gone:
+
+```
+~   just now  user.signal.status  [signal:SERP_RANK]
+      SERP_RANK: proposed -> confirmed
+      before: {"status": "proposed"}
+      after:  {"status": "confirmed"}
+```
+
+**Failures are grouped, not listed.** Each one gets a fingerprint from the
+agent, the action, the exception type and the innermost frame — with counts,
+ids and paths blanked — so the same failure recurring bumps a counter instead
+of burying everything else:
+
+```
+  Open errors (1) — most persistent first
+  [651b7f62ce185725] scout.agent.run  3x, last just now
+      ConnectionError: provider refused request 7 at /api/v2/search
+```
+
+That count is also what agents read to back off instead of retrying a doomed
+call all night. Fixed something? `harvey journal --resolve 651b7f62ce185725`
+hides it — and a recurrence reopens it, because it evidently was not fixed.
+
+Journalling is best-effort everywhere: a broken journal write can end neither a
+cycle nor the change it was describing.
+
 ## How the data is stored
 
-SQLite at `data/harvey.db`. One idea drives the schema:
+SQLite — in `~/.harvey/data/harvey.db` for a normal install, or the checkout's
+own `data/harvey.db` when one is already there (see *Using it from anywhere*).
+`harvey where` prints the path it resolved. One idea drives the schema:
 
 > **Every fact is a row, never a column.**
 
@@ -443,6 +517,8 @@ harvey outbox                # review queued email
 harvey export                # deliverable prospects → CSV
 harvey sending pause|resume  # kill switch
 harvey warmup [domain]       # is the sending domain ready? (SPF/DKIM/DMARC, age, blocklists)
+harvey journal               # what changed, and what's failing (--changes / --errors)
+harvey where                 # which config, env and database this install uses
 harvey retry-writes          # retry prospects the Writer gave up on
 harvey gmail auth            # one-time Gmail OAuth
 harvey microsoft auth|test  # one-time Microsoft 365 sign-in (docs/microsoft365.md)
