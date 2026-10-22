@@ -349,3 +349,111 @@ async def test_inbound_dedup(state):
     await handler._run_native()   # same message again → ignored via dedup
     second = await state.get_conversations_by_status("closed")
     assert len(first) == len(second) == 1
+
+
+# ── the kill switch must hold mail that is ALREADY approved ───────────
+#
+# test_drain_respects_kill_switch above runs with require_approval=False, and
+# the pause returns before staging — so it would pass even if nothing had been
+# queued yet. These start from items already sitting in the outbox as approved
+# and due, which is the state the outbox is in after someone has reviewed a
+# batch and then pauses sending.
+
+async def approved_and_due(state, prospect_id, subject="hello",
+                           body="A real body. Question?", step=1):
+    """An item a human already approved, whose send time has passed.
+
+    `step` varies because add_outbox_item dedups on
+    (prospect, campaign, step) — the guard against queueing one step twice.
+    """
+    return await state.add_outbox_item(
+        prospect_id=prospect_id, to_email="jane@acme.com",
+        subject=subject, body=body,
+        send_at=(datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)).isoformat(),
+        status="approved", campaign_id="c1", step=step,
+    )
+
+
+@pytest.mark.asyncio
+async def test_pause_holds_mail_that_was_already_approved(state):
+    pid = await seed_prospect(state)
+    await approved_and_due(state, pid)
+    provider = FakeProvider()
+    sender = make_sender(state, provider)
+    await state.set_setting("sending_paused", "paused for the dry run")
+
+    await sender._run_native()
+
+    assert provider.sent == []
+    assert await state.get_outbox(status="sent") == []
+    # Still approved, not cancelled or failed: resuming must send it.
+    assert len(await state.get_outbox(status="approved")) == 1
+
+
+@pytest.mark.asyncio
+async def test_pause_holds_a_whole_approved_batch(state):
+    pid = await seed_prospect(state)
+    for i in range(5):
+        await approved_and_due(state, pid, subject=f"hello {i}", step=i + 1)
+    provider = FakeProvider()
+    sender = make_sender(state, provider)
+    await state.set_setting("sending_paused", "paused for the dry run")
+
+    await sender._run_native()
+
+    assert provider.sent == []
+    assert len(await state.get_outbox(status="approved")) == 5
+
+
+@pytest.mark.asyncio
+async def test_approving_while_paused_still_sends_nothing(state):
+    """Approving from the dashboard or CLI does not itself send."""
+    pid = await seed_prospect(state)
+    await state.add_outbox_item(
+        prospect_id=pid, to_email="jane@acme.com", subject="hello",
+        body="A real body. Question?", send_at=_now_iso(),
+        status="pending_review", campaign_id="c1", step=1,
+    )
+    await state.set_setting("sending_paused", "paused for the dry run")
+
+    assert await state.approve_outbox() == 1          # approve everything
+
+    provider = FakeProvider()
+    sender = make_sender(state, provider)
+    await sender._run_native()
+    assert provider.sent == []
+
+
+@pytest.mark.asyncio
+async def test_resuming_releases_the_held_batch(state):
+    """The hold is a pause, not a loss: the same mail goes out after resume."""
+    pid = await seed_prospect(state)
+    await approved_and_due(state, pid)
+    provider = FakeProvider()
+    sender = make_sender(state, provider)
+
+    await state.set_setting("sending_paused", "paused for the dry run")
+    await sender._run_native()
+    assert provider.sent == []
+
+    await state.set_setting("sending_paused", "")
+    await sender._run_native()
+    assert len(provider.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_auto_reply_is_held_by_the_pause_too(state):
+    """Replies queue through the same outbox, so the switch covers them."""
+    pid = await seed_prospect(state)
+    await state.add_outbox_item(
+        prospect_id=pid, to_email="jane@acme.com", subject="Re: hello",
+        body="Thanks for getting back. Shall we talk Tuesday?",
+        send_at=_now_iso(), status="approved", campaign_id="", step=0,
+        kind="reply",
+    )
+    provider = FakeProvider()
+    sender = make_sender(state, provider)
+    await state.set_setting("sending_paused", "paused for the dry run")
+
+    await sender._run_native()
+    assert provider.sent == []
