@@ -10,8 +10,8 @@ import pytz
 
 from harvey.brain import Brain
 from harvey.config import (
-    ConfigError, load_config, load_env, HarveyConfig, legacy_sending_held, sending_notice,
-    compliance_notice,
+    ConfigError, load_config, load_env, HarveyConfig, deployment_held_by_config,
+    sending_notice, compliance_notice,
 )
 from harvey.pipeline import run_profile_stage
 from harvey.state import StateManager
@@ -131,9 +131,22 @@ async def decide_next_action(
     draft_campaigns = summary.get("draft_campaigns", 0) or 0
     open_conversations = summary.get("open_conversations", 0) or 0
 
-    # Held Instantly drafts can't deploy; choosing send_campaign for them
-    # every cycle would starve the writer and scout forever.
-    deployable = 0 if legacy_sending_held(config) else draft_campaigns
+    # A draft that cannot deploy must not win the priority order: there is no
+    # send_campaign branch that runs an agent, so every such cycle does no
+    # prospecting and no writing. Sending is blocked by config (channel off,
+    # or Instantly held for approval) or at runtime by the kill switch —
+    # `harvey sending pause` must stop outbound without also stopping the
+    # pipeline that fills it.
+    #
+    # Native providers run the sender every cycle regardless of the action, so
+    # suppressing send_campaign costs neither outbox draining nor the
+    # marking of sends cut off mid-flight.
+    held = deployment_held_by_config(config)
+    if not held and state is not None:
+        from harvey.agents.sender import KILL_SWITCH_KEY   # lazy, as below
+
+        held = bool(await state.get_setting(KILL_SWITCH_KEY))
+    deployable = 0 if held else draft_campaigns
 
     if open_conversations > 0:
         action, reason = "handle_replies", f"{open_conversations} open conversation(s) waiting"

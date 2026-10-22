@@ -7,6 +7,21 @@ minor versions can still change behaviour.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Blocking outbound no longer stops the pipeline that fills it.** With draft
+  campaigns waiting, the heartbeat kept choosing `send_campaign` when sending
+  was blocked by `channels.email.enabled: false` or by the kill switch
+  (`harvey sending pause`). No agent runs on that branch and the Sender
+  returns immediately, so the drafts never cleared and the Scout and Writer
+  were starved: pausing sending overnight meant no new prospects in the
+  morning. Drafts now count as deployable only when they can actually move —
+  the guard that already covered held Instantly campaigns extended to both
+  cases — so Harvey falls through to writing, then prospecting, and deploys
+  the backlog once sending resumes. Native providers run the Sender every
+  cycle regardless of the chosen action, so nothing is lost: the outbox is
+  still drained and sends cut off mid-flight are still marked.
+
 ### Added
 
 - **A per-user home, so `harvey` works from any directory**

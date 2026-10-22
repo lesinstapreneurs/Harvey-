@@ -200,6 +200,20 @@ def legacy_sending_held(config) -> bool:
             and bool(getattr(email, "require_approval", True)))
 
 
+def deployment_held_by_config(config) -> bool:
+    """True when config alone means a draft campaign cannot be deployed.
+
+    Either the email channel is off, or Instantly is held for approval. The
+    heartbeat needs this because a draft it cannot move must not keep winning
+    the priority order — choosing send_campaign for it every cycle starves the
+    scout and the writer, and prospecting silently stops.
+    """
+    email = getattr(getattr(config, "channels", None), "email", None)
+    if not getattr(email, "enabled", False):
+        return True
+    return legacy_sending_held(config)
+
+
 def sending_notice(config) -> str:
     """A plain-language warning when outbound sending is held by config, or ""."""
     if not legacy_sending_held(config):

@@ -19,6 +19,17 @@ CONFIG = SimpleNamespace(channels=SimpleNamespace(email=SimpleNamespace(
     provider="gmail", require_approval=True)))
 
 
+def config(enabled=True, provider="gmail", require_approval=True):
+    return SimpleNamespace(channels=SimpleNamespace(email=SimpleNamespace(
+        enabled=enabled, provider=provider, require_approval=require_approval)))
+
+
+# A pipeline with drafts waiting AND prospects left to work on: the shape that
+# exposes a stall, because a draft outranks both writing and prospecting.
+BUSY = {"prospects": {"new": 50}, "writable_prospects": 50,
+        "draft_campaigns": 2, "open_conversations": 0}
+
+
 @pytest_asyncio.fixture
 async def state(tmp_path):
     state = StateManager(str(tmp_path / "stall.db"))
@@ -128,3 +139,67 @@ async def test_a_summary_without_the_new_count_keeps_the_old_rule():
     # Callers that build their own summary (older tests, scripts) still work.
     summary = {"prospects": {"new": 3}, "draft_campaigns": 0, "open_conversations": 0}
     assert await decide_next_action(None, None, CONFIG, summary=summary) == "write_campaign"
+
+
+# ── blocked sending must not stop the pipeline that fills it ───────────
+
+@pytest.mark.asyncio
+async def test_sending_on_still_deploys_drafts(state):
+    """The ordinary case: a draft that can go out wins, as before."""
+    assert await decide_next_action(None, state, config(), BUSY) == "send_campaign"
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_email_channel_does_not_stall_the_loop(state):
+    """`channels.email.enabled: false` left drafts winning every cycle.
+
+    There is no send_campaign branch that runs an agent, so Harvey did no
+    prospecting and no writing until someone turned sending back on.
+    """
+    assert await decide_next_action(None, state, config(enabled=False),
+                                    BUSY) == "write_campaign"
+
+
+@pytest.mark.asyncio
+async def test_the_kill_switch_does_not_stall_the_loop(state):
+    """`harvey sending pause` stops outbound, not the funnel behind it.
+
+    Pausing overnight used to mean no new prospects in the morning.
+    """
+    await state.set_setting("sending_paused", "paused manually")
+    assert await decide_next_action(None, state, config(), BUSY) == "write_campaign"
+
+
+@pytest.mark.asyncio
+async def test_resuming_deploys_the_drafts_that_piled_up(state):
+    await state.set_setting("sending_paused", "paused manually")
+    assert await decide_next_action(None, state, config(), BUSY) == "write_campaign"
+    await state.set_setting("sending_paused", "")
+    assert await decide_next_action(None, state, config(), BUSY) == "send_campaign"
+
+
+@pytest.mark.asyncio
+async def test_blocked_sending_falls_all_the_way_to_prospecting(state):
+    """With nothing left to write, the funnel keeps being filled."""
+    await state.set_setting("sending_paused", "paused manually")
+    quiet = {**BUSY, "prospects": {"new": 0}, "writable_prospects": 0}
+    assert await decide_next_action(None, state, config(), quiet) == "prospect"
+
+
+@pytest.mark.asyncio
+async def test_a_reply_still_outranks_everything_while_paused(state):
+    await state.set_setting("sending_paused", "paused manually")
+    busy = {**BUSY, "open_conversations": 3}
+    assert await decide_next_action(None, state, config(), busy) == "handle_replies"
+
+
+@pytest.mark.asyncio
+async def test_held_instantly_is_still_guarded(state):
+    assert await decide_next_action(
+        None, state, config(provider="instantly"), BUSY) == "write_campaign"
+
+
+@pytest.mark.asyncio
+async def test_no_state_means_no_settings_read(state):
+    """decide_next_action is called without state in places; it must not crash."""
+    assert await decide_next_action(None, None, config(), BUSY) == "send_campaign"
