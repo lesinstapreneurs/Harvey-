@@ -22,10 +22,13 @@ already learned.
 
 import asyncio
 import base64
+import csv
 import logging
 import re
+import time
 from html import unescape
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
@@ -1008,3 +1011,219 @@ def provider_menu(env: dict | None = None) -> list[dict]:
         for p in PROVIDERS.values()
     ]
 
+
+
+class ListePubliqueOF(DiscoveryProvider):
+    """The French register of declared training organisations (DGEFP).
+
+    Free, authoritative and exhaustive: every provider that has filed a
+    declaration of activity under L.6351-7-1, refreshed daily. For a segment
+    of training organisations this beats any scraper and any search engine —
+    a web search for "organisme de formation France" returns the national
+    giants and the directories that rank for it, which is the opposite of a
+    small-provider ICP.
+
+    What the register gives, and nothing else does:
+
+    * ``numeroDeclarationActivite`` (NDA) — the identity key, so an exclusion
+      list keyed on NDA matches exactly rather than by name or domain.
+    * ``certifications.actionsDeFormation`` — holds a valid quality
+      certification for training actions. Without it a provider cannot be
+      funded by the CPF or an OPCO, so for anything sold on that premise it
+      is a hard requirement, not a preference.
+    * NSF speciality codes — what they actually declare they teach. A
+      certification registered under NSF 320 has a target list of exactly the
+      providers declaring 320.
+    * ``effectifFormateurs`` and ``nbStagiaires`` — a real size signal, which
+      is what keeps a 3000-person group out of a "1-50 employees" ICP.
+
+    What it does not give: a website or an email. Companies therefore arrive
+    without a domain, identified by NDA, and a later pass has to resolve the
+    site before contacts can be found.
+
+    ``query.term`` selects the speciality: a 3-digit NSF code matches exactly,
+    anything else matches the speciality label. ``query.location`` matches the
+    town, postcode or region code when set.
+    """
+
+    key = "listeof"
+    label = "Liste publique des organismes de formation (DGEFP)"
+    kind = "listings"
+    blurb = ("The official French register of declared training providers, "
+             "refreshed daily. Free, exhaustive, and carries the quality "
+             "certification, the NSF speciality and a size signal.")
+    cost_note = "free"
+    free_tier = "unlimited — a public dataset, no account"
+    signup_url = ("https://www.data.gouv.fr/datasets/"
+                  "liste-publique-des-organismes-de-formation-l-6351-7-1-du-code-du-travail")
+    env_keys = ()
+    caveat = ("No website and no email in the register, so contacts need a "
+              "separate resolution pass. France only.")
+
+    CSV_URL = ("https://www.monactiviteformation.emploi.gouv.fr"
+               "/mon-activite-formation/public/listePubliqueOF?format=csv")
+    # The file is ~36 MB and changes daily; a day-old copy is fine and saves
+    # re-downloading it for every query in a run.
+    CACHE_MAX_AGE_HOURS = 24
+    # A provider cannot be CPF- or OPCO-funded without it, so anything sold on
+    # that premise has no reason to look at the rest.
+    REQUIRE_QUALITY_CERTIFICATION = True
+    # Keeps the national groups out of a small-provider ICP. 0 disables it.
+    MAX_TRAINERS = 20
+
+    _NAME = "denomination"
+    _NDA = "numeroDeclarationActivite"
+    _QUALITY = "certifications.actionsDeFormation"
+    _TRAINERS = "informationsDeclarees.effectifFormateurs"
+    _TRAINEES = "informationsDeclarees.nbStagiaires"
+    _TOWN = "adressePhysiqueOrganismeFormation.ville"
+    _POSTCODE = "adressePhysiqueOrganismeFormation.codePostal"
+    _REGION = "adressePhysiqueOrganismeFormation.codeRegion"
+    _STREET = "adressePhysiqueOrganismeFormation.voie"
+    _SPECIALITY_CODES = tuple(
+        f"informationsDeclarees.specialitesDeFormation.codeSpecialite{n}" for n in (1, 2, 3))
+    _SPECIALITY_LABELS = tuple(
+        f"informationsDeclarees.specialitesDeFormation.libelleSpecialite{n}" for n in (1, 2, 3))
+
+    def estimate(self, queries: list[DiscoveryQuery]) -> float:
+        return 0.0
+
+    def _cache_path(self) -> Path:
+        from harvey import paths
+
+        directory = paths.home() / "cache"
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory / "liste_publique_of.csv"
+
+    async def _ensure_cached(self, client: httpx.AsyncClient) -> Path:
+        """Download the register unless a recent copy is already on disk."""
+        path = self._cache_path()
+        if path.is_file():
+            age_hours = (time.time() - path.stat().st_mtime) / 3600
+            if age_hours < self.CACHE_MAX_AGE_HOURS and path.stat().st_size > 1_000_000:
+                return path
+
+        logger.info("listeof: downloading the register (~36 MB, once a day)")
+        partial = path.with_suffix(".part")
+        async with client.stream("GET", self.CSV_URL, timeout=300.0) as response:
+            response.raise_for_status()
+            # open(path, "wb") rather than path.open("wb"): the Windows
+            # encoding guard in the test suite reads the mode as the second
+            # positional argument, and a Path method puts it first.
+            with open(partial, "wb") as handle:
+                async for chunk in response.aiter_bytes(1 << 16):
+                    handle.write(chunk)
+        partial.replace(path)          # never leave a half file where a whole one goes
+        return path
+
+    @staticmethod
+    def _clean(value: str | None) -> str:
+        return (value or "").strip().strip('"').strip()
+
+    def _specialities(self, row: dict) -> list[tuple[str, str]]:
+        pairs = []
+        for code_key, label_key in zip(self._SPECIALITY_CODES, self._SPECIALITY_LABELS):
+            code = self._clean(row.get(code_key))
+            if code:
+                pairs.append((code, self._clean(row.get(label_key))))
+        return pairs
+
+    def _matched_speciality(self, row: dict, term: str) -> tuple[str, str] | None:
+        """The speciality that satisfied the query, not merely the first one.
+
+        An organisation declares up to three. Reporting the first would label
+        a provider matched on NSF 321 as "Commerce, vente" because that is
+        what it happens to have declared first — which reads as a targeting
+        bug when it is only a display one.
+        """
+        term = term.strip().lower()
+        specialities = self._specialities(row)
+        if not term:
+            return specialities[0] if specialities else None
+        for code, label in specialities:
+            if (code == term) if term.isdigit() else (term in label.lower()):
+                return code, label
+        return None
+
+    def _matches_location(self, row: dict, location: str) -> bool:
+        """A number is a département, a name is a town, a region is explicit.
+
+        INSEE region codes collide with département numbers — 75 is Paris as a
+        département and Nouvelle-Aquitaine as a region — so matching a bare
+        number against both silently answered a query for Paris with a
+        provider in Bergerac. A bare number is therefore read as a département
+        only, which is what someone typing "75" means. A region is asked for
+        by name: ``region:11``.
+        """
+        location = location.strip().lower()
+        if not location:
+            return True
+        if location.startswith("region:"):
+            return self._clean(row.get(self._REGION)) == location.split(":", 1)[1].strip()
+        if location.replace(" ", "").isdigit():
+            return self._clean(row.get(self._POSTCODE)).startswith(location.replace(" ", ""))
+        return location in self._clean(row.get(self._TOWN)).lower()
+
+    def _size_ok(self, row: dict) -> bool:
+        if not self.MAX_TRAINERS:
+            return True
+        raw = self._clean(row.get(self._TRAINERS))
+        if not raw:
+            return True            # undeclared: keep it, do not guess
+        try:
+            return int(float(raw)) <= self.MAX_TRAINERS
+        except ValueError:
+            return True
+
+    async def fetch(self, client: httpx.AsyncClient, env: dict,
+                    query: DiscoveryQuery) -> list[Business]:
+        self.last_cost = 0.0
+        path = await self._ensure_cached(client)
+
+        found: list[Business] = []
+        with path.open(encoding="utf-8", errors="replace", newline="") as handle:
+            for row in csv.DictReader(handle, delimiter=";"):
+                if len(found) >= query.limit:
+                    break
+                name = self._clean(row.get(self._NAME))
+                nda = self._clean(row.get(self._NDA))
+                if not name or not nda:
+                    continue
+                if self.REQUIRE_QUALITY_CERTIFICATION and \
+                        self._clean(row.get(self._QUALITY)).lower() != "true":
+                    continue
+                speciality = self._matched_speciality(row, query.term)
+                if speciality is None:
+                    continue
+                if not self._matches_location(row, query.location):
+                    continue
+                if not self._size_ok(row):
+                    continue
+
+                town = self._clean(row.get(self._TOWN))
+                postcode = self._clean(row.get(self._POSTCODE))
+                found.append(Business(
+                    name=name,
+                    # The register carries no website, so the declaration
+                    # number is the identity. The prefix is deliberately the
+                    # plain "nda:" and not the provider's name: an exclusion
+                    # list keyed on the same NDA has to resolve to the same
+                    # company, and it cannot if each side invents its own.
+                    external_id=f"nda:{nda}",
+                    address=" ".join(p for p in (self._clean(row.get(self._STREET)),
+                                                 postcode, town) if p),
+                    location=" ".join(p for p in (postcode, town) if p),
+                    category=speciality[1],
+                    has_website=None,
+                    source_url=self.signup_url,
+                    provider=self.key,
+                    raw_title=name,
+                ))
+        logger.info("listeof: %s organisations match %r in %r",
+                    len(found), query.term or "any speciality", query.location or "France")
+        return found
+
+
+# Registered here rather than in the literal above: the class is defined after
+# it, and a provider is useless to the menu until the module finishes loading.
+PROVIDERS[ListePubliqueOF.key] = ListePubliqueOF()

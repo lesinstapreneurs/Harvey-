@@ -40,16 +40,24 @@ from harvey.state import DO_NOT_PROSPECT, StateManager
 # First match wins, so put the most specific alias first.
 NAME_KEYS = ("name", "organisme", "raison_sociale", "raison sociale", "company")
 DOMAIN_KEYS = ("domain", "site", "site_internet", "site internet", "website", "url")
-ID_KEYS = ("external_id", "nda", "siret", "siren", "id")
+# Ordered: the identity scheme has to be the one other collectors use for the
+# same company, so an NDA stays "nda:<number>" rather than becoming an
+# import-specific key that resolves to nothing.
+ID_KEYS = ("nda", "siret", "siren", "external_id", "id")
 NOTE_KEYS = ("note", "statut", "status", "commentaire")
 
 
 def pick(row: dict, keys: tuple[str, ...]) -> str:
+    return pick_named(row, keys)[1]
+
+
+def pick_named(row: dict, keys: tuple[str, ...]) -> tuple[str, str]:
+    """The matching column's name and its value, so the caller can label it."""
     for key in keys:
         for actual, value in row.items():
             if actual and actual.strip().lower() == key and (value or "").strip():
-                return value.strip()
-    return ""
+                return key, value.strip()
+    return "", ""
 
 
 def bare_host(value: str) -> str:
@@ -128,13 +136,17 @@ async def main() -> int:
                 skipped += 1
                 continue
             seen += 1
-            identifier = pick(row, ID_KEYS)
+            id_column, identifier = pick_named(row, ID_KEYS)
             note = pick(row, NOTE_KEYS) or "no status"
             company_id = await state.add_company(Company(
                 name=name,
                 domain=bare_host(pick(row, DOMAIN_KEYS)),
-                # A business with no website still has to dedup across re-runs.
-                external_id=f"excl:{identifier}" if identifier else f"excl:{name}",
+                # A business with no website still has to dedup across
+                # re-runs, and against whatever else discovers it later. The
+                # scheme is shared on purpose: the register of training
+                # providers identifies the same company as "nda:<number>".
+                external_id=(f"{id_column}:{identifier}" if identifier
+                             else f"name:{name.lower()}"),
                 source=args.source,
             ))
             for code in (args.code, DO_NOT_PROSPECT):
