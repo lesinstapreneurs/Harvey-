@@ -64,6 +64,20 @@ class ICPConfig(BaseModel):
     # hiring a "Head of Growth" is buying growth tooling). Empty → falls back
     # to `titles`. Used for careers-page scanning and job-board discovery.
     hiring_signals: list[str] = []
+    # Search queries to find companies, used verbatim when set.
+    #
+    # The generated queries below are a guess assembled from the fields above,
+    # and a guess in English shape finds nothing for a segment described in
+    # another language. Anyone who knows how their market talks about itself
+    # can say so here and stop guessing:
+    #
+    #   search_queries:
+    #     - "organisme de formation reseaux sociaux Qualiopi"
+    #     - "formation community management certifiante CPF"
+    #
+    # Keep them unquoted: a quoted phrase has to appear verbatim on the page,
+    # and most of these descriptors never do.
+    search_queries: list[str] = []
     # Discovery needs a radius, not a place name. Maps each entry in
     # `geography` to "lat,lng,radius_km" — e.g.
     #   "Denver, CO": "39.7392,-104.9903,50"

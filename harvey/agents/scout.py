@@ -1064,37 +1064,40 @@ class Scout:
         return [d for d in domains if not (d in seen or seen.add(d))][:5]
 
     def _build_company_search_queries(self) -> list[str]:
-        """Build search queries to find ICP-matching companies."""
+        """Search queries to find ICP-matching companies.
+
+        ``icp.search_queries`` wins when set: a generated query is a guess, and
+        whoever configured the ICP knows how their market describes itself.
+
+        The generated fallback deliberately leaves out ``company_size``. It is
+        a descriptor for a human ("1-50 salaries"), not a string that appears
+        on a company's website, and quoting it made every query unmatchable —
+        which is exactly what it did: three searches, zero results, no error.
+        The industry stays quoted because it is a real phrase pages use; the
+        geography does not, so a page saying "Lyon" still matches "France".
+        """
+        explicit = [q.strip() for q in (self.config.icp.search_queries or []) if q.strip()]
+        if explicit:
+            return explicit[:MAX_QUERIES_PER_CYCLE]
+
         queries = []
         industries = self.config.icp.industries or [""]
         geos = self.config.icp.geography or [""]
-        size = self.config.icp.company_size or ""
 
-        for industry in industries[:2]:
+        for industry in industries[:3]:
+            if not industry:
+                continue
             geo = geos[0] if geos else ""
+            queries.append(" ".join(p for p in (f'"{industry}"', geo) if p))
 
-            parts = []
-            if industry:
-                parts.append(f'"{industry}"')
-            if geo:
-                parts.append(f'"{geo}"')
-            if size:
-                parts.append(f'"{size}"')
-            parts.append("company")
-            queries.append(" ".join(parts))
-
-            if geo and industry:
-                queries.append(f'top "{industry}" companies {geo}')
-
-        # Drop empties / dupes, cap to budget.
         seen = set()
         out = []
-        for q in queries:
-            q = q.strip()
-            if q and q != "company" and q not in seen:
-                seen.add(q)
-                out.append(q)
-        return out[:3]
+        for query in queries:
+            query = query.strip()
+            if query and query not in seen:
+                seen.add(query)
+                out.append(query)
+        return out[:MAX_QUERIES_PER_CYCLE]
 
     async def _resolve_email(
         self, first_name: str, last_name: str, domain: str
