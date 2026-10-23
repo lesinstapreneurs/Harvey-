@@ -63,7 +63,18 @@ MAX_COMPANIES_PER_CYCLE = 10
 # only mailboxes it will use, most likely read by the owner first. An
 # allowlist, not a blocklist: a personal address (jane.doe@) on a contact
 # page is a person Harvey chose not to target, never "the team".
-INBOX_PAGES = ("/contact", "/contact-us")
+INBOX_PAGES = ("/contact", "/contact-us", "/nous-contacter", "/contactez-nous",
+               "/mentions-legales")
+
+# A directory, a comparison site or a trade magazine usually says so in its own
+# hostname. Matching the shape catches the next one too, which a literal list
+# never does.
+_AGGREGATOR_SHAPE = re.compile(
+    r"annuaire|comparateur|comparer|classement|palmares|meilleur|top\d|"
+    r"guide-|-guide|avis-|-avis|portail|magazine|-mag\.|actualite|lesechos|"
+    r"journal|presse|news\.|\.news|blog\.|trouver-|choisir-|devis",
+    re.IGNORECASE,
+)
 INBOX_PREFERRED = ("owner", "office", "info", "contact", "contactus", "hello",
                    "team", "service", "sales", "estimates", "quotes",
                    "inquiries", "enquiries", "admin", "support")
@@ -1335,8 +1346,16 @@ Respond ONLY with the JSON array."""
 
     async def _scrape_team_page(self, domain: str) -> list[dict]:
         """Try to find and scrape a company's team/about page."""
+        # French paths matter more than they look. A site in France must
+        # publish who runs it on /mentions-legales — it is a legal obligation,
+        # so it is the one page where a named director is reliably found, and
+        # an English-only list never asks for it. The first run bore that out:
+        # twenty 404s per company, and not one named person anywhere.
         team_paths = ["/team", "/about", "/about-us", "/our-team", "/people",
-                      "/leadership", "/about/team", "/company/team", "/staff"]
+                      "/leadership", "/about/team", "/company/team", "/staff",
+                      "/mentions-legales", "/equipe", "/notre-equipe",
+                      "/a-propos", "/qui-sommes-nous", "/l-equipe",
+                      "/mentions-legales/", "/a-propos-de-nous"]
         members = []
 
         base, _ = await self._resolve_base_url(domain)
@@ -1755,7 +1774,9 @@ Respond ONLY with the JSON array."""
         return note[:400]
 
     _CAREERS_PATHS = ("/careers", "/jobs", "/careers/", "/join-us", "/join",
-                      "/about/careers", "/company/careers", "/work-with-us")
+                      "/about/careers", "/company/careers", "/work-with-us",
+                      "/recrutement", "/nous-rejoindre", "/carrieres",
+                      "/offres-emploi", "/rejoignez-nous")
 
     async def _scrape_hiring_signals(self, domain: str) -> list[str]:
         """Scan the company's careers page for open roles matching our
@@ -1912,10 +1933,23 @@ Respond ONLY with the JSON array."""
             "g2.com", "capterra.com", "clutch.co",
             "trustpilot.com", "getapp.com", "producthunt.com",
             "youtu.be", "goo.gl", "bit.ly", "t.co",
+            # Observed answering "organisme de formation France": a directory,
+            # a comparison site and an HR magazine. None is a prospect, and
+            # each one costs a full scrape before being recognised as such.
+            "iciformation.fr", "learnthings.fr", "rhmatin.com",
+            "kelformation.com", "maformation.fr", "studyrama.com",
+            "onisep.fr", "pole-emploi.fr", "francetravail.fr",
+            "moncompteformation.gouv.fr", "francecompetences.fr",
+            "certificationprofessionnelle.fr", "data.gouv.fr",
+            "pagesjaunes.fr", "societe.com", "pappers.fr", "verif.com",
         }
         if domain in noise:
             return True
-        return any(domain == n or domain.endswith(f".{n}") for n in noise)
+        if any(domain == n or domain.endswith(f".{n}") for n in noise):
+            return True
+        # Shape, not a list: a directory or a magazine names itself. A new one
+        # appears every month, and enumerating them is a losing game.
+        return bool(_AGGREGATOR_SHAPE.search(domain))
 
     def _domain_to_name(self, domain: str) -> str:
         """Convert a domain to a rough company name."""
