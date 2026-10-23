@@ -40,6 +40,13 @@ BUSY_TIMEOUT_SECONDS = 30.0
 # Email statuses the Writer drafts for. Shared with the heartbeat so it only
 # chooses write_campaign when there is something the Writer will act on.
 WRITABLE_EMAIL_STATUSES = ("verified", "risky")
+
+# Signal reserve : une entreprise qui le porte ne doit jamais etre prospectee.
+# Un client, un partenaire actuel, une demande en cours. L'exclusion par
+# cohorte ne suffit pas : le backfill de contacts ne passe pas par cohort(),
+# il lit companies_needing_prospects() — qui doit donc filtrer aussi, sinon
+# Harvey part chercher les interlocuteurs de gens deja signes.
+DO_NOT_PROSPECT = "DO_NOT_PROSPECT"
 # Settings key, per prospect: the user emailed them by hand from the
 # dashboard. Its value is the status they had before, so undo is exact; its
 # presence tells the Sender never to email them as well.
@@ -1633,6 +1640,10 @@ class StateManager:
                    FROM companies c
                    LEFT JOIN prospects p ON p.company_id = c.id
                    WHERE c.domain != ''
+                     AND NOT EXISTS (
+                           SELECT 1 FROM observations o
+                           WHERE o.company_id = c.id
+                             AND o.signal_code = 'DO_NOT_PROSPECT')
                      AND (c.prospects_checked_at IS NULL
                           OR c.prospects_checked_at < datetime('now', ?))
                    GROUP BY c.id

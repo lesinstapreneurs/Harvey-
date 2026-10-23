@@ -157,8 +157,15 @@ class Scout:
         # Job boards first: hiring is the strongest intent signal, and the
         # strategy self-skips when python-jobspy isn't installed.
         strategies.append(("hiring_boards", self._prospect_via_hiring_boards))
-        strategies.append(("profile_search", self._prospect_via_profile_search))
+        # Discovery before profile search, and not the other way round: the
+        # per-cycle query budget is small (MAX_QUERIES_PER_CYCLE), and profile
+        # search spends it on `site:linkedin.com/in` queries that LinkedIn
+        # blocks for scrapers. Running it first left company discovery with
+        # zero queries, so it returned nothing and the funnel had no input at
+        # all. Adding people to known companies matters less than having
+        # companies to add them to.
         strategies.append(("company_discovery", self._prospect_via_company_discovery))
+        strategies.append(("profile_search", self._prospect_via_profile_search))
 
         for name, strategy in strategies:
             try:
