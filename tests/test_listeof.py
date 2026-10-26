@@ -11,7 +11,10 @@ import asyncio
 
 import pytest
 
-from harvey.collectors.discover import PROVIDERS, DiscoveryQuery
+from harvey.collectors import discover as D
+from harvey.collectors.discover import (
+    PROVIDERS, DiscoveryQuery, ListePubliqueOF,
+)
 
 HEADER = ";".join([
     "numeroDeclarationActivite", "denomination",
@@ -131,3 +134,100 @@ def test_the_register_carries_no_website(provider):
 def test_the_source_is_free(provider):
     assert provider.estimate([DiscoveryQuery(term="320")]) == 0.0
     assert provider.cost_note == "free"
+
+
+# ── Speciality selected by the configured category ──
+
+
+def _row(**over):
+    row = {
+        ListePubliqueOF._NAME: "FORMASOCIAL",
+        ListePubliqueOF._NDA: "11755555555",
+        ListePubliqueOF._QUALITY: "true",
+        ListePubliqueOF._TRAINERS: "4",
+        ListePubliqueOF._TOWN: "PARIS",
+        ListePubliqueOF._POSTCODE: "75011",
+        ListePubliqueOF._REGION: "11",
+        ListePubliqueOF._STREET: "1 rue de la Paix",
+        ListePubliqueOF._SPECIALITY_CODES[0]: "320",
+        ListePubliqueOF._SPECIALITY_LABELS[0]:
+            "Specialites plurivalentes de la communication et de l'information",
+    }
+    row.update(over)
+    return row
+
+
+def test_the_configured_category_selects_the_speciality():
+    """The NSF code is the register's vocabulary. A readable industry name
+    never appears in an NSF label, so without the category the query that
+    should return 1,331 organisations returns none."""
+    provider = ListePubliqueOF()
+    row = _row()
+
+    # What the industry name alone does: nothing.
+    assert provider._matched_speciality(row, "Organisme de formation") is None
+    # What the configured code does.
+    assert provider._matched_speciality(row, "320")[0] == "320"
+
+
+def test_fetch_prefers_the_category_over_the_term(tmp_path, monkeypatch):
+    import csv as _csv
+
+    path = tmp_path / "register.csv"
+    row = _row()
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        writer = _csv.DictWriter(handle, fieldnames=list(row), delimiter=";")
+        writer.writeheader()
+        writer.writerow(row)
+
+    provider = ListePubliqueOF()
+    monkeypatch.setattr(provider, "_ensure_cached",
+                        lambda client: _done(path))
+
+    # The industry name would match nothing; the category carries the code.
+    query = D.DiscoveryQuery(term="Organisme de formation", category="320",
+                             limit=10)
+    found = asyncio.run(provider.fetch(None, {}, query))
+    assert [b.name for b in found] == ["FORMASOCIAL"]
+    assert found[0].external_id == "nda:11755555555"
+
+    # Without the category, the same row is not selected.
+    bare = D.DiscoveryQuery(term="Organisme de formation", limit=10)
+    assert asyncio.run(provider.fetch(None, {}, bare)) == []
+
+
+async def _done(value):
+    return value
+
+
+def test_the_register_declares_that_it_needs_a_category():
+    assert ListePubliqueOF.needs_category is True
+
+
+# ── A nationwide geography is not a town ──
+
+
+@pytest.mark.parametrize("location", ["France", "france", " FR ", "toute la France"])
+def test_naming_the_country_filters_nothing(location):
+    """``icp.geography: [France]`` is the natural way to say "everywhere".
+    Filtered as a town it matched nothing, so the whole segment came back
+    empty."""
+    provider = ListePubliqueOF()
+    assert provider._matches_location(_row(), location) is True
+
+
+def test_a_town_is_still_filtered_exactly():
+    provider = ListePubliqueOF()
+    assert provider._matches_location(_row(), "paris") is True
+    assert provider._matches_location(_row(), "lyon") is False
+
+
+def test_roissy_en_france_is_a_town_not_the_country():
+    """Matching the country as a substring would have made this one town
+    the answer to every nationwide query."""
+    provider = ListePubliqueOF()
+    roissy = _row(**{ListePubliqueOF._TOWN: "ROISSY-EN-FRANCE",
+                     ListePubliqueOF._POSTCODE: "95700"})
+    assert provider._matches_location(roissy, "roissy-en-france") is True
+    # And a Paris row is not dragged in by a query for that town.
+    assert provider._matches_location(_row(), "roissy-en-france") is False

@@ -574,8 +574,8 @@ def cmd_discover(args):
                 notes.append("no coordinates — add icp.geo_coordinates "
                              "for radius search")
             if provider.needs_category and not q.category:
-                notes.append(f"no category for {q.term!r} — this matches the "
-                             "business NAME only; add icp.industry_categories")
+                notes.append(f"no category for {q.term!r} — falls back to a "
+                             "weak text match; add icp.industry_categories")
             print(f"    - {q.keyword()}"
                   + (f"   ({'; '.join(notes)})" if notes else ""))
         if len(queries) > 8:

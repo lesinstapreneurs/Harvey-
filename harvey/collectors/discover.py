@@ -1058,9 +1058,12 @@ class ListePubliqueOF(DiscoveryProvider):
     without a domain, identified by NDA, and a later pass has to resolve the
     site before contacts can be found.
 
-    ``query.term`` selects the speciality: a 3-digit NSF code matches exactly,
-    anything else matches the speciality label. ``query.location`` matches the
-    town, postcode or region code when set.
+    The speciality is selected by ``query.category`` when one is configured
+    (``icp.industry_categories``), falling back to ``query.term``: a 3-digit
+    NSF code matches exactly, anything else matches the speciality label. The
+    code is worth configuring — a readable industry name almost never appears
+    verbatim in an NSF label, so the fallback usually matches nothing.
+    ``query.location`` matches the town, postcode or region code when set.
     """
 
     key = "listeof"
@@ -1076,6 +1079,9 @@ class ListePubliqueOF(DiscoveryProvider):
     env_keys = ()
     caveat = ("No website and no email in the register, so contacts need a "
               "separate resolution pass. France only.")
+    # The NSF code is the register's own vocabulary; a speciality label match
+    # is the weak fallback.
+    needs_category = True
 
     CSV_URL = ("https://www.monactiviteformation.emploi.gouv.fr"
                "/mon-activite-formation/public/listePubliqueOF?format=csv")
@@ -1087,6 +1093,9 @@ class ListePubliqueOF(DiscoveryProvider):
     REQUIRE_QUALITY_CERTIFICATION = True
     # Keeps the national groups out of a small-provider ICP. 0 disables it.
     MAX_TRAINERS = 20
+    # The register covers France and nothing else, so naming the country is
+    # the same as naming no place at all.
+    _WHOLE_COUNTRY = frozenset({"france", "fr", "toute la france"})
 
     _NAME = "denomination"
     _NDA = "numeroDeclarationActivite"
@@ -1171,9 +1180,14 @@ class ListePubliqueOF(DiscoveryProvider):
         provider in Bergerac. A bare number is therefore read as a département
         only, which is what someone typing "75" means. A region is asked for
         by name: ``region:11``.
+
+        A nationwide ``icp.geography`` of "France" is not a place to filter
+        on: the register is France-only, so it means no filter. Matched
+        exactly rather than as a substring, because Roissy-en-France is a
+        town and would otherwise be the only "France" in the file.
         """
         location = location.strip().lower()
-        if not location:
+        if not location or location in self._WHOLE_COUNTRY:
             return True
         if location.startswith("region:"):
             return self._clean(row.get(self._REGION)) == location.split(":", 1)[1].strip()
@@ -1209,7 +1223,8 @@ class ListePubliqueOF(DiscoveryProvider):
                 if self.REQUIRE_QUALITY_CERTIFICATION and \
                         self._clean(row.get(self._QUALITY)).lower() != "true":
                     continue
-                speciality = self._matched_speciality(row, query.term)
+                speciality = self._matched_speciality(
+                    row, query.category or query.term)
                 if speciality is None:
                     continue
                 if not self._matches_location(row, query.location):
@@ -1236,8 +1251,9 @@ class ListePubliqueOF(DiscoveryProvider):
                     provider=self.key,
                     raw_title=name,
                 ))
-        logger.info("listeof: %s organisations match %r in %r",
-                    len(found), query.term or "any speciality", query.location or "France")
+        logger.info("listeof: %s organisations match %r in %r", len(found),
+                    query.category or query.term or "any speciality",
+                    query.location or "France")
         return found
 
 
