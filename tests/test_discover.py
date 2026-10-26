@@ -7,6 +7,7 @@ anyone, and that directories never make it in.
 """
 
 import asyncio
+import json
 import os
 from contextlib import closing
 import tempfile
@@ -765,3 +766,119 @@ def test_homepage_prefers_stronger_brand_over_longer_partial_match():
     html = ('<meta property="og:site_name" content="Kettleman Landscaping">'
             '<title>Landscaping Professionals</title>')
     assert D.site_name_from_html(html, "kettlemanlandscaping.com") == "Kettleman Landscaping"
+
+
+# ── Industry → provider category ──
+#
+# Without a category a listings provider matches the industry against the
+# business NAME, so "Agence immobiliere" finds the few agencies called that
+# and misses every Orpi. These tests pin the wiring and the warning.
+
+
+def _icp_config(config, **overrides):
+    """A copy of the loaded config with the ICP fields a test cares about."""
+    clone = config.model_copy(deep=True)
+    for field, value in overrides.items():
+        setattr(clone.icp, field, value)
+    return clone
+
+
+def test_build_queries_carries_the_configured_category(config):
+    cfg = _icp_config(
+        config,
+        industries=["Agence immobiliere", "Restaurant"],
+        geography=["Ile-de-France"],
+        geo_coordinates={"Ile-de-France": "48.8566,2.3522,30"},
+        industry_categories={"Agence immobiliere": "real_estate_agency",
+                             "Restaurant": "restaurant"},
+    )
+    queries = D.build_queries(cfg, depth=30, limit=100)
+    assert [(q.term, q.category, q.coordinate) for q in queries] == [
+        ("Agence immobiliere", "real_estate_agency", "48.8566,2.3522,30"),
+        ("Restaurant", "restaurant", "48.8566,2.3522,30"),
+    ]
+
+
+def test_an_industry_with_no_mapping_gets_no_category(config):
+    cfg = _icp_config(
+        config,
+        industries=["Agence immobiliere", "Salle de sport"],
+        geography=[""],
+        industry_categories={"Agence immobiliere": "real_estate_agency"},
+    )
+    assert [q.category for q in D.build_queries(cfg)] == ["real_estate_agency", ""]
+
+
+def test_dataforseo_sends_categories_and_omits_the_title(config):
+    """The category and the title are alternatives, not additions: sending
+    both would AND them and return almost nothing."""
+    sent = {}
+
+    async def capture(request):
+        sent["payload"] = json.loads(request.content.decode())[0]
+        return httpx.Response(200, json={"cost": 0.0, "tasks": []})
+
+    async def run():
+        provider = D.DataForSEOListings()
+        env = {"dataforseo_login": "u", "dataforseo_password": "p",
+               "dataforseo_sandbox": "1"}
+        query = D.DiscoveryQuery(term="Agence immobiliere",
+                                 location="Ile-de-France",
+                                 category="real_estate_agency",
+                                 coordinate="48.8566,2.3522,30")
+        transport = httpx.MockTransport(capture)
+        async with httpx.AsyncClient(transport=transport) as client:
+            await provider.fetch(client, env, query)
+
+    asyncio.run(run())
+    payload = sent["payload"]
+    assert payload["categories"] == ["real_estate_agency"]
+    assert "title" not in payload
+    assert payload["location_coordinate"] == "48.8566,2.3522,30"
+    assert "description" not in payload
+
+
+def test_only_providers_that_select_by_category_need_one():
+    """OSM derives its own tags from the term, so a configured category
+    would add nothing there — the flag has to be per provider."""
+    assert D.PROVIDERS["dataforseo_listings"].needs_category is True
+    assert D.PROVIDERS["osm"].needs_category is False
+
+
+@pytest.mark.asyncio
+async def test_a_query_that_matched_nothing_is_reported(state, config, register):
+    """A paid query returning zero is otherwise invisible — the run just
+    reports a smaller total, and a wrong slug looks like an empty market."""
+    provider = register(FakeProvider([[]]))
+    queries = [D.DiscoveryQuery(term="Agence immobiliere",
+                                location="Ile-de-France",
+                                category="agence_immobiliere")]
+
+    report = await D.run_discovery(state, config, "fake", queries)
+
+    assert report.found == 0
+    assert len(report.errors) == 1
+    assert "'agence_immobiliere'" in report.errors[0]
+    assert "Agence immobiliere Ile-de-France" in report.errors[0]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_query_without_a_category_still_says_so(state, config, register):
+    register(FakeProvider([[]]))
+    queries = [D.DiscoveryQuery(term="Restaurant", location="Paris")]
+
+    report = await D.run_discovery(state, config, "fake", queries)
+
+    assert report.errors == ["Restaurant Paris: no results"]
+
+
+@pytest.mark.asyncio
+async def test_a_query_that_found_something_is_not_reported(state, config, register):
+    register(FakeProvider([[biz(name="Orpi Levallois", domain="orpi-levallois.fr")]]))
+    queries = [D.DiscoveryQuery(term="Agence immobiliere", location="Paris",
+                                category="real_estate_agency")]
+
+    report = await D.run_discovery(state, config, "fake", queries)
+
+    assert report.found == 1
+    assert report.errors == []

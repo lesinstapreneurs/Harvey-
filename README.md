@@ -489,7 +489,8 @@ Two files, both plain text.
 ```yaml
 persona:      { name, company, role, email, tone }
 product:      { name, description, pricing, key_benefits, objection_responses, offer }
-icp:          { industries, titles, company_size, geography, hiring_signals, geo_coordinates }
+icp:          { industries, titles, company_size, geography, hiring_signals, geo_coordinates,
+                industry_categories }
 channels:
   email:      { provider: gmail | microsoft | smtp | instantly, max_daily_sends, require_approval,
                 send_to_risky, max_bounce_rate }

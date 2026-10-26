@@ -191,6 +191,14 @@ Cities are geocoded automatically (cached forever, one lookup per city), or set
 `icp.geo_coordinates` in harvey.yaml to control the radius:
 `"Denver, CO": "39.7392,-104.9903,50"`.
 
+**Map each industry to the provider's own category** in
+`icp.industry_categories` — `"Agence immobiliere": "real_estate_agency"`.
+DataForSEO Business Listings selects by Google's category vocabulary; without a
+mapping it can only match the industry against the business *name*, so it finds
+the agencies literally called "Agence immobiliere" and misses every Orpi.
+`harvey discover --estimate` flags any query that lacks one, and a query that
+comes back with zero results says which category to check.
+
 **Depth 20-30, not 100.** Google removed 100-results-per-page in September 2025,
 so depth 100 is now billed as ten pages at nearly every provider. Below rank 30
 it is mostly directories anyway.

@@ -83,6 +83,13 @@ class ICPConfig(BaseModel):
     #   "Denver, CO": "39.7392,-104.9903,50"
     # Without one, listings providers can only match on the business name.
     geo_coordinates: dict[str, str] = {}
+    # Maps each entry in `industries` to the provider's own category slug —
+    # e.g. "Agence immobiliere": "real_estate_agency". It matters more than it
+    # looks: without it a listings provider can only match the industry against
+    # the business NAME, so "Agence immobiliere" finds the agencies that happen
+    # to be called that and misses every Century 21 and Orpi. The slug is the
+    # provider's vocabulary (DataForSEO uses Google's), not ours.
+    industry_categories: dict[str, str] = {}
 
 
 class WarmupConfig(BaseModel):

@@ -566,10 +566,18 @@ def cmd_discover(args):
 
         report = await run_discovery(state, config, args.provider, queries,
                                      max_spend=args.max_spend, dry_run=True)
-        print(f"\n  {len(queries)} queries via {PROVIDERS[args.provider].label}")
+        provider = PROVIDERS[args.provider]
+        print(f"\n  {len(queries)} queries via {provider.label}")
         for q in queries[:8]:
-            print(f"    - {q.keyword()}" + ("" if q.coordinate else
-                  "   (no coordinates — add icp.geo_coordinates for radius search)"))
+            notes = []
+            if not q.coordinate:
+                notes.append("no coordinates — add icp.geo_coordinates "
+                             "for radius search")
+            if provider.needs_category and not q.category:
+                notes.append(f"no category for {q.term!r} — this matches the "
+                             "business NAME only; add icp.industry_categories")
+            print(f"    - {q.keyword()}"
+                  + (f"   ({'; '.join(notes)})" if notes else ""))
         if len(queries) > 8:
             print(f"    ... and {len(queries) - 8} more")
         print(f"\n  Estimated cost: ${report.estimated_cost:.4f}"

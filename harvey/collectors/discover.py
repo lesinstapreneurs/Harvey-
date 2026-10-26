@@ -365,6 +365,10 @@ class DiscoveryProvider:
     signup_url: str = ""
     env_keys: tuple[str, ...] = ()
     caveat: str = ""
+    # True when the provider selects by its own category vocabulary and falls
+    # back to matching the business NAME without one. OSM is False: it derives
+    # its own tags from the term, so a configured category adds nothing.
+    needs_category: bool = False
 
     def configured(self, env: dict) -> bool:
         return all(env.get(k) for k in self.env_keys)
@@ -401,6 +405,7 @@ class DataForSEOListings(DiscoveryProvider):
     signup_url = "https://app.dataforseo.com/api-access"
     env_keys = ("dataforseo_login", "dataforseo_password")
     caveat = "No email addresses — Harvey resolves those in a later stage."
+    needs_category = True
 
     TASK_COST = 0.012
     ITEM_COST = 0.00036
@@ -798,16 +803,19 @@ def build_queries(config, cities: list[str] | None = None,
 
     One query per (industry x city). Coordinates come from
     ``icp.geo_coordinates`` when present, because listings providers need a
-    radius, not a place name.
+    radius, not a place name; categories come from ``icp.industry_categories``,
+    because otherwise the industry is matched against the business name.
     """
     icp = config.icp
     terms = list(icp.industries) or [config.product.name]
     places = cities if cities is not None else list(icp.geography) or [""]
     coords = getattr(icp, "geo_coordinates", {}) or {}
+    categories = getattr(icp, "industry_categories", {}) or {}
 
     return [
         DiscoveryQuery(term=term, location=place, depth=depth, limit=limit,
-                       coordinate=coords.get(place, ""))
+                       coordinate=coords.get(place, ""),
+                       category=categories.get(term, ""))
         for term in terms
         for place in places
     ]
@@ -906,6 +914,15 @@ async def run_discovery(
                     continue
 
                 report.found += len(found)
+                if not found:
+                    # A paid query that matched nothing is almost always a
+                    # wrong category slug or too tight a radius. Both are
+                    # silent otherwise: the run just reports a smaller total.
+                    report.errors.append(
+                        f"{query.keyword()}: no results"
+                        + (f" — check the category {query.category!r} against "
+                           "the provider's own list"
+                           if query.category else ""))
                 batch = []
                 for biz in found:
                     if is_junk(biz.domain, biz.raw_title or biz.name):
