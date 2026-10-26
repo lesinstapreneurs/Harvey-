@@ -649,8 +649,32 @@ def load_brain_config(config_path: str | None = None) -> BrainConfig:
 
 
 def load_env() -> EnvConfig:
-    """Load environment variables from .env file."""
-    load_dotenv()
+    """Read the credentials, loading every ``.env`` that applies first.
+
+    ``load_dotenv()`` with no argument reads a ``.env`` beside the *current
+    working directory*, so a profile's own credentials in
+    ``$HARVEY_HOME/.env`` were never seen: running any command from a checkout
+    silently used that checkout's file, or none at all, and a provider that
+    was configured reported itself as "not configured". Only ``harvey warmup``
+    had it right.
+
+    Files load least specific first, so a checkout's ``.env`` overrides the
+    home one. A variable already exported in the real environment wins over
+    both, because that is how a cloud environment and CI supply credentials,
+    and a stale file should not shadow them.
+
+    Populating ``os.environ`` is deliberate, not a side effect to tidy away:
+    ``integrations.email_finder`` and ``humanize`` read their keys straight
+    from the environment, so they only see a profile's credentials because
+    this ran. A test that calls this has to restore ``os.environ`` itself.
+    """
+    from harvey import paths
+
+    exported = dict(os.environ)
+    for path in paths.env_files():
+        load_dotenv(path, override=True)
+    os.environ.update(exported)
+
     env = EnvConfig(
         instantly_api_key=os.getenv("INSTANTLY_API_KEY", "").strip(),
         dataforseo_login=os.getenv("DATAFORSEO_LOGIN", "").strip(),
