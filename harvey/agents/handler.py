@@ -14,7 +14,8 @@ from datetime import datetime, timezone
 
 from harvey.brain import Brain, BrainUnavailable
 from harvey.config import (
-    DEFAULT_OPT_OUT_LINE, HarveyConfig, EnvConfig, compliance_of, legacy_sending_held,
+    DEFAULT_OPT_OUT_LINE, HarveyConfig, EnvConfig, compliance_of, fold_accents,
+    legacy_sending_held,
 )
 from harvey.humanize import humanize, humanizer_enabled
 from harvey.integrations.instantly import InstantlyClient
@@ -64,15 +65,41 @@ OPT_OUT_PATTERNS = (
     "never contact",
     "delete my info",
     "delete my data",
+    # French, folded (no accents): a prospect who writes "désinscription" or
+    # "ne me contactez plus" has opted out as plainly as one who writes
+    # "unsubscribe", and Harvey has to honour it without asking the model.
+    "desinscription",
+    "desinscrire",
+    "desabonner",
+    "desabonnement",
+    "ne plus me contacter",
+    "ne plus m'ecrire",
+    "ne plus m'envoyer",
+    "ne me contactez plus",
+    "ne m'ecrivez plus",
+    "ne m'envoyez plus",
+    "arretez de m'envoyer",
+    "arretez de me contacter",
+    "retirez-moi",
+    "retirez moi",
+    "supprimez mes donnees",
+    "effacez mes donnees",
+    "pas de demarchage",
 )
 # "No thanks" (what cold email's footer asks for) as a phrase: not "no
 # Thanksgiving", "Bruno / Thanks," or "yes or no, thanks".
 # Checked one line at a time: "...the answer is no / Thanks!" is a sign-off.
 NO_THANKS_RE = re.compile(
     r"(?<!\bor )\bno,?[ \t]+thank(?:s|[ \t]+you)\b(?![ \t]+(?:needed|necessary|required))")
+# The same shape in French: "non merci" as a phrase, not "oui ou non, merci"
+# and not "non, merci quand meme" turning a polite sign-off into an opt-out —
+# which it is anyway, so only the "or" guard carries over.
+NON_MERCI_RE = re.compile(r"(?<!\bou )\bnon,?[ \t]+merci\b")
 # A reply that says only this (signature aside) is an opt-out ("Reply STOP").
 BARE_OPT_OUTS = {"stop", "unsubscribe", "remove", "remove me", "opt out",
-                 "no thanks", "no thank you"}
+                 "no thanks", "no thank you",
+                 "non merci", "desinscription", "desabonnement",
+                 "retirez-moi", "retirez moi", "supprimez-moi", "supprimez moi"}
 _MOBILE_SIGNATURE_RE = re.compile(
     r"^[ \t]*(?:sent from my \w[^\n]*|get outlook for \w[^\n]*|sent from \w+ mail[^\n]*)$",
     re.IGNORECASE | re.MULTILINE)
@@ -93,7 +120,7 @@ def _flat(text: str) -> str:
     text = re.sub(r"^[ \t>]+", "", text, flags=re.MULTILINE)
     text = (text.replace("\u201c", '"').replace("\u201d", '"')
             .replace("\u2018", "'").replace("\u2019", "'"))
-    return " ".join(text.lower().split())
+    return " ".join(fold_accents(text).split())
 
 
 class OurText:
@@ -142,7 +169,8 @@ def _is_opt_out(their_text: str, own_words: str) -> bool:
     thanks" only within a line."""
     if any(p in _flat(their_text) for p in OPT_OUT_PATTERNS):
         return True
-    if any(NO_THANKS_RE.search(_flat(line)) for line in their_text.split("\n")):
+    if any(NO_THANKS_RE.search(_flat(line)) or NON_MERCI_RE.search(_flat(line))
+           for line in their_text.split("\n")):
         return True
     bare = _flat(_MOBILE_SIGNATURE_RE.sub("", own_words or ""))
     return re.sub(r"[^\w\s-]", "", bare).strip() in BARE_OPT_OUTS

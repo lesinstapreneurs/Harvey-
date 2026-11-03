@@ -3,6 +3,7 @@
 import logging
 import os
 import re
+import unicodedata
 from datetime import date as _date, time as _time
 from pathlib import Path
 
@@ -339,11 +340,28 @@ class PreclearedConfig(BaseModel):
 DEFAULT_OPT_OUT_LINE = 'Not interested? Reply "no thanks" and I won\'t email again.'
 # The replies the Handler always honours as an opt-out on their own; an
 # opt_out_line must ask for one of them ("Reply STOP", 'reply "no thanks"').
+# French is in the list because a French campaign's opt-out line has to pass
+# this validator, and a French prospect writes "stop" or "non merci", never
+# "no thanks". Spelled without accents: the line is folded before matching.
 OPT_OUT_WORDS = ("no thanks", "no thank you", "unsubscribe", "stop", "remove me",
-                 "opt out")
+                 "opt out", "non merci", "desinscription", "desabonnement",
+                 "desinscrire", "desabonner")
+# The verb that asks for the opt-out is the part that changes between
+# languages: "Reply STOP", "R\u00e9pondez \u00ab stop \u00bb", "\u00c9crivez-moi STOP".
 _ASKS_FOR_OPT_OUT_RE = re.compile(
-    r"\breply(?:\s+with)?\s*[\"'\u201c\u2018]?\s*(?:"
+    r"\b(?:reply|repond(?:ez|re)|ecriv(?:ez|re))(?:[\s-]+(?:with|moi))?\s*"
+    r"[\"'\u00ab\u201c\u2018]?\s*(?:"
     + "|".join(re.escape(w) for w in OPT_OUT_WORDS) + r")\b", re.IGNORECASE)
+# A link or an address in an opt-out line, in either language.
+_OPT_OUT_LINK_BITS = ("http", "www.", "click", "cliquez", "@")
+
+
+def fold_accents(text: str) -> str:
+    """Lowercase with accents removed, so "R\u00e9pondez \u00ab STOP \u00bb" compares as
+    "repondez \u00ab stop \u00bb". Opt-out matching has to be accent-blind: a prospect
+    writes "d\u00e9sinscription", and a phone keyboard may not."""
+    folded = unicodedata.normalize("NFKD", (text or "").lower())
+    return "".join(c for c in folded if not unicodedata.combining(c))
 
 
 class ComplianceConfig(BaseModel):
@@ -368,15 +386,16 @@ class ComplianceConfig(BaseModel):
         lowered = v.lower()
         if not v:
             return v
-        if any(bit in lowered for bit in ("http", "www.", "click", "@")):
+        if any(bit in lowered for bit in _OPT_OUT_LINK_BITS):
             raise ValueError(
                 "opt_out_line can't contain a link or an email address: cold email "
                 "allows one link, and opting out must be as simple as replying."
             )
-        if not _ASKS_FOR_OPT_OUT_RE.search(v):
+        if not _ASKS_FOR_OPT_OUT_RE.search(fold_accents(v)):
             raise ValueError(
                 "opt_out_line must ask for a reply Harvey recognises as an opt-out, "
-                'e.g. Reply "no thanks" / Reply STOP. Recognised: '
+                'e.g. Reply "no thanks" / Reply STOP, or in French '
+                'Répondez « stop » / Répondez "non merci". Recognised: '
                 + ", ".join(f'"{w}"' for w in OPT_OUT_WORDS) + "."
             )
         return v

@@ -559,3 +559,64 @@ async def test_template_lines_with_merge_tags_are_recognised_when_quoted(state):
     handler.brain = RecordingBrain("interested")
     await handler._run_native()
     assert handler.brain.prompts  # our pitch's "attorney" didn't escalate
+
+
+# ── A French campaign: the opt-out has to work in the language sent ──
+
+def test_a_french_opt_out_line_is_accepted():
+    # Harvey ships an English line, but a French campaign needs a French one,
+    # and the validator used to reject every one of these.
+    for line in ('Pas intéressé ? Répondez « stop » et je n\'écris plus.',
+                 'Répondez "non merci" et je ne vous écris plus.',
+                 'Répondez "désinscription" pour ne plus rien recevoir.',
+                 "Écrivez-moi STOP pour ne plus être contacté."):
+        assert ComplianceConfig(opt_out_line=line).opt_out_line
+
+
+def test_a_french_opt_out_line_still_cant_hide_a_link():
+    import pydantic
+    for bad in ("Pour vous désinscrire, cliquez ici.",
+                "Désinscription sur www.exemple.fr",
+                "Si cela ne vous intéresse pas, dites-le moi."):
+        with pytest.raises(pydantic.ValidationError):
+            ComplianceConfig(opt_out_line=bad)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [
+    "désinscription",
+    "Non merci.",
+    "non, merci",
+    "Merci de ne plus me contacter.",
+    "Retirez-moi de votre liste.",
+    "Arrêtez de m'envoyer des mails.",
+    "Ne m'écrivez plus.",
+    "Supprimez mes données.",
+], ids=["desinscription", "non-merci", "comma", "ne-plus-contacter",
+        "retirez-moi", "arretez", "necrivez-plus", "donnees"])
+async def test_a_french_opt_out_is_honoured(state, body):
+    status, _ = await _reply(state, body)
+    assert status == "opted_out"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [
+    "Oui ou non, merci de me rappeler.",
+    "Intéressé, pouvez-vous m'en dire plus ?",
+    "Je suis en congé, je reviens le 12.",
+], ids=["oui-ou-non", "interesse", "conge"])
+async def test_french_that_isnt_an_opt_out_is_left_alone(state, body):
+    status, _ = await _reply(state, body)
+    assert status != "opted_out"
+
+
+@pytest.mark.asyncio
+async def test_a_quoted_french_footer_is_not_an_opt_out(state):
+    # Accents are folded for matching; our own quoted line must still be
+    # recognised as ours, or every French reply would read as an opt-out.
+    line = 'Pas intéressé ? Répondez « stop » et je n\'écris plus.'
+    sent = "Une note courte et simple. Une question ?\n\n" + ADDRESS + "\n" + line
+    status, _ = await _reply_after_sending(
+        state, "Oui, parlons-en mardi.\n\nLe mardi Harvey a écrit :\n> "
+        + sent.replace("\n", "\n> "), sent_bodies=[sent], line=line)
+    assert status != "opted_out"
